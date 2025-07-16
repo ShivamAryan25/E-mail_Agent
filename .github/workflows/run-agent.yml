@@ -1,8 +1,8 @@
-name: Run Email Agent Every 15 Minutes
+name: Run Email Agent Every Hour
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # Every 15 minutes (UTC)
+    - cron: '0 * * * *'  # Every hour (UTC)
   workflow_dispatch:
 
 jobs:
