@@ -8,15 +8,17 @@ from gmail_service import get_new_emails, create_label_if_not_exists, apply_labe
 from gemini_service import get_summary_and_deadline
 from tasks_service import get_task_list_id, create_task
 
+# --- CONFIGURATION ---
 EMAIL_LIST_FILE = "emails_to_track.txt"
-TASK_LIST_NAME = "My Tasks"
+TASK_LIST_NAME = "Emails" 
 PROCESSED_LABEL_NAME = "Processed-By-Agent"
-CHECK_INTERVAL_SECONDS = 900
 
+# --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 def load_sender_emails(filename):
+    """Loads a list of sender emails from a text file."""
     try:
         with open(filename, 'r') as f:
             emails = [line.strip() for line in f if line.strip() and not line.startswith('#')]
@@ -29,7 +31,11 @@ def load_sender_emails(filename):
         return None
 
 def main():
-    logging.info("--- Gmail to Tasks Agent Started ---")
+    """
+    This version of the main function runs only ONCE and then exits.
+    It is designed to be run by a scheduler like GitHub Actions.
+    """
+    logging.info("--- Gmail to Tasks Agent Started (Single Run) ---")
     
     sender_emails = load_sender_emails(EMAIL_LIST_FILE)
     if not sender_emails:
@@ -59,56 +65,53 @@ def main():
         logging.error(f"Error creating or finding Gmail label: {e}")
         return
 
-    while True:
-        try:
-            logging.info(f"Checking for new emails from addresses in '{EMAIL_LIST_FILE}'")
-            
-            emails = get_new_emails(gmail_service, sender_emails, PROCESSED_LABEL_NAME)
-
-            if not emails:
-                logging.info("No new emails to process.")
-            else:
-                logging.info(f"Found {len(emails)} new emails to process.")
-
-                for email_data in emails:
-                    email_id = email_data['id']
-                    email_subject = email_data['subject']
-                    email_body = email_data['body']
-                    
-                    logging.info(f"Processing email: '{email_subject}' (ID: {email_id})")
-
-                    if not email_body:
-                        logging.warning("Email body is empty, skipping.")
-                        apply_label_to_email(gmail_service, email_id, label_id)
-                        continue
-                    
-                    try:
-                        analysis = get_summary_and_deadline(email_body, email_subject)
-                        if analysis and analysis.get('summary'):
-                            summary = analysis['summary']
-                            deadline = analysis.get('deadline')
-                            
-                            logging.info(f"Gemini Summary: '{summary}'")
-                            if deadline:
-                                logging.info(f"Gemini Found Deadline: {deadline}")
-
-                            create_task(tasks_service, task_list_id, summary, deadline)
-                            
-                            apply_label_to_email(gmail_service, email_id, label_id)
-
-                        else:
-                            logging.warning(f"Could not generate a summary for email ID: {email_id}. Applying label to skip.")
-                            apply_label_to_email(gmail_service, email_id, label_id)
-
-                    except Exception as e:
-                        logging.error(f"An error occurred during Gemini processing or Task creation for email ID {email_id}: {e}")
-
-        except Exception as e:
-            logging.error(f"An unexpected error occurred in the main loop: {e}")
+    try:
+        logging.info(f"Checking for new emails from addresses in '{EMAIL_LIST_FILE}'")
         
-        logging.info(f"Waiting for {CHECK_INTERVAL_SECONDS} seconds before next check.")
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        emails = get_new_emails(gmail_service, sender_emails, PROCESSED_LABEL_NAME)
 
+        if not emails:
+            logging.info("No new emails to process.")
+        else:
+            logging.info(f"Found {len(emails)} new emails to process.")
+
+            for email_data in emails:
+                email_id = email_data['id']
+                email_subject = email_data['subject']
+                email_body = email_data['body']
+                
+                logging.info(f"Processing email: '{email_subject}' (ID: {email_id})")
+
+                if not email_body:
+                    logging.warning("Email body is empty, skipping.")
+                    apply_label_to_email(gmail_service, email_id, label_id)
+                    continue
+                
+                try:
+                    analysis = get_summary_and_deadline(email_body, email_subject)
+                    if analysis and analysis.get('summary'):
+                        summary = analysis['summary']
+                        deadline = analysis.get('deadline')
+                        
+                        logging.info(f"Gemini Summary: '{summary}'")
+                        if deadline:
+                            logging.info(f"Gemini Found Deadline: {deadline}")
+
+                        create_task(tasks_service, task_list_id, summary, deadline)
+                        apply_label_to_email(gmail_service, email_id, label_id)
+                    else:
+                        logging.warning(f"Could not generate a summary for email ID: {email_id}. Applying label to skip.")
+                        apply_label_to_email(gmail_service, email_id, label_id)
+                except Exception as e:
+                    logging.error(f"An error occurred during Gemini processing or Task creation for email ID {email_id}: {e}")
+                
+                # Add a small delay to be kind to the API, especially if many emails are found
+                time.sleep(2)
+
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in the main process: {e}")
+    
+    logging.info("--- Agent Run Finished ---")
 
 if __name__ == '__main__':
     main()
