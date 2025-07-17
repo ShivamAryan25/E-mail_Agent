@@ -1,34 +1,117 @@
-name: Run Email Agent Every Hour
+import os
+import time
+import logging
+from datetime import datetime
 
-on:
-  schedule:
-    - cron: '0 * * * *'  # Every hour (UTC)
-  workflow_dispatch:
+from google_auth import get_google_services
+from gmail_service import get_new_emails, create_label_if_not_exists, apply_label_to_email
+from gemini_service import get_summary_and_deadline
+from tasks_service import get_task_list_id, create_task
 
-jobs:
-  run-agent:
-    runs-on: ubuntu-latest
+# --- CONFIGURATION ---
+EMAIL_LIST_FILE = "emails_to_track.txt"
+TASK_LIST_NAME = "Emails" 
+PROCESSED_LABEL_NAME = "Processed-By-Agent"
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+# --- LOGGING SETUP ---
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+def load_sender_emails(filename):
+    """Loads a list of sender emails from a text file."""
+    try:
+        with open(filename, 'r') as f:
+            emails = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        if not emails:
+            logging.error(f"'{filename}' is empty or contains no valid email entries. Exiting.")
+            return None
+        return emails
+    except FileNotFoundError:
+        logging.error(f"Error: The email list file '{filename}' was not found. Please create it. Exiting.")
+        return None
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+def main():
+    """
+    This version of the main function runs only ONCE and then exits.
+    It is designed to be run by a scheduler like GitHub Actions.
+    """
+    logging.info("--- Gmail to Tasks Agent Started (Single Run) ---")
+    
+    sender_emails = load_sender_emails(EMAIL_LIST_FILE)
+    if not sender_emails:
+        return
 
-      - name: Restore credentials and env
-        run: |
-          echo "${{ secrets.CREDENTIALS_B64 }}" | base64 -d > credentials.json
-          echo "${{ secrets.TOKEN_B64 }}" | base64 -d > token.json
-          echo "${{ secrets.ENV_B64 }}" | base64 -d > .env
+    try:
+        gmail_service, tasks_service = get_google_services()
+        logging.info("Successfully authenticated with Google services.")
+    except Exception as e:
+        logging.error(f"Failed to authenticate with Google services: {e}")
+        return
 
-      - name: Run Agent
-        run: |
-          python mian.py
+    try:
+        task_list_id = get_task_list_id(tasks_service, TASK_LIST_NAME)
+        if not task_list_id:
+            logging.error(f"Task list '{TASK_LIST_NAME}' not found. Please create it in Google Tasks.")
+            return
+        logging.info(f"Found Task List ID for '{TASK_LIST_NAME}': {task_list_id}")
+    except Exception as e:
+        logging.error(f"Error finding task list: {e}")
+        return
+
+    try:
+        label_id = create_label_if_not_exists(gmail_service, PROCESSED_LABEL_NAME)
+        logging.info(f"Using label '{PROCESSED_LABEL_NAME}' with ID: {label_id}")
+    except Exception as e:
+        logging.error(f"Error creating or finding Gmail label: {e}")
+        return
+
+    try:
+        logging.info(f"Checking for new emails from addresses in '{EMAIL_LIST_FILE}'")
+        
+        emails = get_new_emails(gmail_service, sender_emails, PROCESSED_LABEL_NAME)
+
+        if not emails:
+            logging.info("No new emails to process.")
+        else:
+            logging.info(f"Found {len(emails)} new emails to process.")
+
+            for email_data in emails:
+                email_id = email_data['id']
+                email_subject = email_data['subject']
+                email_body = email_data['body']
+                
+                logging.info(f"Processing email: '{email_subject}' (ID: {email_id})")
+
+                if not email_body:
+                    logging.warning("Email body is empty, skipping.")
+                    apply_label_to_email(gmail_service, email_id, label_id)
+                    continue
+                
+                try:
+                    analysis = get_summary_and_deadline(email_body, email_subject)
+                    if analysis and analysis.get('summary'):
+                        summary = analysis['summary']
+                        deadline = analysis.get('deadline')
+                        
+                        logging.info(f"Gemini Summary: '{summary}'")
+                        if deadline:
+                            logging.info(f"Gemini Found Deadline: {deadline}")
+
+                        create_task(tasks_service, task_list_id, summary, deadline)
+                        apply_label_to_email(gmail_service, email_id, label_id)
+                    else:
+                        logging.warning(f"Could not generate a summary for email ID: {email_id}. Applying label to skip.")
+                        apply_label_to_email(gmail_service, email_id, label_id)
+                except Exception as e:
+                    logging.error(f"An error occurred during Gemini processing or Task creation for email ID {email_id}: {e}")
+                
+                # Add a small delay to be kind to the API, especially if many emails are found
+                time.sleep(2)
+
+    except Exception as e:
+        logging.error(f"An unexpected error occurred in the main process: {e}")
+    
+    logging.info("--- Agent Run Finished ---")
+
+if __name__ == '__main__':
+    main()
